@@ -59,12 +59,12 @@ The project is divided into two main parts:
 - **Terraform**: For infrastructure provisioning.
 
 ### AWS Resources
-- **ECR Repository**: For storing Docker images.
+- **ECR Repository**: For storing Docker images. Please update `.github/workflows/ci-cd-pipeline.yml` with your ECR repository name.
 - **IAM Roles**: For GitHub Actions (push to ECR) and Kubernetes (pull from ECR).
 - **S3 Bucket**: For storing security scan reports and logs.
 
 ### GitOps Repository (two options)
-- **Another repository for GitOps (Recommended)**: You have to update ./.github/workflows/ci-cd-pipeline.yml file with your gitops repository url.
+- **Another repository for GitOps (Recommended)**: You have to update `.github/workflows/ci-cd-pipeline.yml` file with your gitops repository url.
 - **GitOps repository in the same repository**: create new directory e.g. `gitops` and do step above.
 
 ---
