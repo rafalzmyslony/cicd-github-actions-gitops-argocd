@@ -1,7 +1,7 @@
 # Flask CI/CD Pipeline with GitHub Actions, AWS ECR, and ArgoCD
 
-This project demonstrates a robust CI/CD pipeline for a Flask application using **GitHub Actions**, **AWS ECR**, and **ArgoCD**. It includes best practices for security, automation, and GitOps, making it an excellent example of modern DevOps workflows.
-
+This project demonstrates a robust CI/CD pipeline for a Flask application using **GitHub Actions**, **AWS ECR**, and **ArgoCD**. It includes best practices for security, automation, and GitOps, making it an excellent example of modern DevOps workflows. Projects needs a Gitops repository, so I've created one for this project - `https://github.com/rafalzmyslony/gitops-for-sample-apps`.  
+ 
 ## Overview
 
 The project is divided into two main parts:
@@ -61,8 +61,8 @@ The project is divided into two main parts:
 - **S3 Bucket**: For storing security scan reports and logs.
 
 ### GitOps Repository (two options)
-- **Another repository for GitOps (Recommended)**: For example, a separate repository for managing Kubernetes manifests.
-- **GitOps repository in the same repository**: For example, a separate `argocd` folder in the same repository. You must then create a new directory called `argocd` and clone gitops repository into it. Remember to update all references to the gitops repository in the workflow file - paths to `kubectl` commands, ArgoCD application manifests, etc.
+- **Another repository for GitOps (Recommended)**: You have to update ./.github/workflows/ci-cd-pipeline.yml file with your gitops repository url.
+- **GitOps repository in the same repository**: create new directory e.g. `gitops` and do step above.
 
 ---
 
@@ -105,6 +105,7 @@ aws ecr create-repository --repository-name github-ci/python-flask-app --region 
 ```
 
 #### Create S3 Bucket for Logs
+
 ```bash
 aws s3api create-bucket --bucket reports-from-github-action-123 --region eu-central-1 --create-bucket-configuration LocationConstraint=eu-central-1
 ```
@@ -180,6 +181,11 @@ We must create monitoring infrastructure in ArgoCD - Grafana, Prometheus, Loki. 
 
 ---
 
+## Less known details from the project:
+- Grafana Dashboard that displays custom metrics from Flask App and its logs. Flask app uses prometheus library to expose metrics.  
+- We have custom program written in python to push data to loki from flask app. This script fetched trivy reports from S3 and pushed to Loki. So this app needs some AWS credentials to be able to access S3 bucket and push to Loki, so we use existing IAM user for this purpose - github-ecr-pusher.  
+- Notification mocking in pipeline. We can send notifications to slack, discord, etc.  
+- Bootstrapping Flask app and entire monitoring infrastructure via ArgoCD using a separate gitops repository.  
 ## Roadmap
 
 ### Immediate Improvements
