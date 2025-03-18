@@ -45,6 +45,7 @@ The project is divided into two main parts:
 6. **Python App that sends various scan reports to Loki**:
    - The CI step pushes scan reports to S3 bucket. This app fetches them from S3 and sends them to Loki.
 ---
+![alt text](assets/image-argocd.png)
 
 ![alt text](assets/image-grafana-dashboard.png)
 
