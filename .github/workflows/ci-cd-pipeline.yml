@@ -1,0 +1,329 @@
+name: Flask CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+
+env:
+  REGISTRY: 743241827577.dkr.ecr.eu-central-1.amazonaws.com
+  REPOSITORY: github-ci/python-flask-app
+  AWS_REGION: eu-central-1
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: self-hosted
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: gitleaks run
+        uses: gitleaks/gitleaks-action@v2
+        continue-on-error: true
+
+      - name: Check Test Results
+        if: always()
+        run: |
+          echo Command to notify author of gitleaks issues
+          echo get output from gitleaks to know what exactly is wrong
+
+      - name: Override Exit Code for Green Status (for demo purposes)
+        if: failure()  #  Runs only if the previous step failed
+        run: exit 0  #  Forces the job to be marked as successful
+
+
+  code-quality:
+    name: Code Quality (Linting & Tests)
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+          cache: 'pip'  # Cache pip dependencies
+
+      - name: Install Dependencies
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+          pip install flake8 pytest pytest-cov bandit black
+
+      - name: Run Flake8 (Linting)
+        id: flake8
+        continue-on-error: true  # Don't fail pipeline
+        run: |
+          flake8 src/ --max-line-length=120 --exclude=venv | tee flake8_output.txt
+          echo $? > flake8_exit_code.txt  # Save exit code separately
+
+      - name: Upload Flake8 Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake8-report
+          path: |
+            flake8_output.txt
+            flake8_exit_code.txt
+
+      - name: Run Black (Auto-Fix Formatting)
+        run: |
+          source venv/bin/activate
+          black src/ --check || black src/
+
+
+      - name: Run Unit Tests with Coverage
+        id: tests
+        run: |
+          source venv/bin/activate
+          pytest src/ --cov=./src --cov-report=xml --junitxml=report.xml 2>&1 | tee test_output.txt
+          echo $? > test_exit_code.txt
+
+      - name: Check Test Results
+        if: always()
+        run: |
+          TEST_EXIT_CODE=$(cat test_exit_code.txt)
+          if [ "$TEST_EXIT_CODE" -ne 0 ]; then
+            echo "Unit tests failed:"
+            cat test_output.txt
+            echo "Sending notification..."
+            # Add notification logic here, e.g., curl to Slack
+            echo curl -X POST -H 'Content-type: application/json' \
+            echo  --data "{\"text\":\"Unit tests failed for commit ${{ github.sha }} by ${{ github.actor }}:\n\`\`\`\n$(cat test_output.txt)\n\`\`\`\nDetails: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+
+          else
+            echo "Unit tests passed successfully."
+          fi
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            report.xml
+            test_output.txt
+            test_exit_code.txt
+
+  security-scans:
+    name: Security Scans
+    runs-on: self-hosted
+    needs: ['code-quality','gitleaks']
+    if: always()
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install Security Tools
+        run: |
+          pip install bandit safety
+          # Use sudo to install Trivy to /usr/local/bin
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+          trivy --version  # Verify installation
+
+      - name: Run Bandit (Python SAST)
+        run: |
+          bandit -r src/ --exit-zero || { echo "Bandit found issues"; exit 1; }
+
+      - name: Run Safety (Dependency Check)
+        run: |
+          safety check -r requirements.txt --full-report || { echo "Safety found vulnerabilities"; exit 1; }
+
+      - name: Run Trivy (Filesystem & Dependencies)
+        run: |
+          trivy fs --scanners vuln --severity HIGH,CRITICAL --format table --exit-code 1 .
+
+
+  notify:
+    name: Notify about all occurrences
+    runs-on: self-hosted
+    needs: security-scans
+    if: always()  # Run regardless of previous job status 
+    steps:
+      - name: Download Flake8 Report
+        uses: actions/download-artifact@v4
+        with:
+          name: flake8-report
+
+      - name: Read Flake8 Exit Code
+        run: echo "FLAKE8_EXIT_CODE=$(cat flake8_exit_code.txt)" >> $GITHUB_ENV
+
+      - name: Check for Flake8 Issues
+        run: |
+          if [ "$FLAKE8_EXIT_CODE" -ne 0 ]; then
+            echo "Flake8 found issues. Notifying author... CURL ..."
+            exit 1  # Fails the job if you want notifications only on failures
+          else
+            echo "No Flake8 issues found."
+          fi
+
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: self-hosted
+    needs: [code-quality, security-scans]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract Image Tag
+        run: echo "IMAGE_TAG=$(git rev-parse --short HEAD)-$(date +%s)" >> $GITHUB_ENV
+
+      - name: Build Docker Image
+        run: docker build -t "$REGISTRY/$REPOSITORY:${{ env.IMAGE_TAG }}" .
+
+      - name: Scan Docker Image with Trivy
+        continue-on-error: true
+        run: |
+          trivy image --severity HIGH,CRITICAL --format json --exit-code 1 "$REGISTRY/$REPOSITORY:${{ env.IMAGE_TAG }}" > trivy-report.json || true
+
+
+      - name: Upload Trivy Report as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-report
+          path: trivy-report.json
+
+      - name: Push Docker Image to ECR
+        run: |
+          docker push "$REGISTRY/$REPOSITORY:${{ env.IMAGE_TAG }}"
+          docker tag "$REGISTRY/$REPOSITORY:${{ env.IMAGE_TAG }}" "$REGISTRY/$REPOSITORY:latest" 
+          docker push "$REGISTRY/$REPOSITORY:latest"
+
+      - name: Output Image URI
+        run: echo "Image pushed to $REGISTRY/$REPOSITORY:${{ env.IMAGE_TAG }}"
+  
+
+      - name: Notify Slack on Trivy Failures
+        if: always()  #  Runs this step even if the previous one failed
+        run: |
+          echo "Trivy scan failed. Sending notification..."
+          # Add notification logic here, e.g., curl to Slack
+          echo curl -X POST -H 'Content-type: application/json' \
+          echo  --data "{\"text\":\"Trivy scan failed for commit ${{ github.sha }} by ${{ github.actor }}:\n\`\`\`\n$(cat trivy-report.txt)\n\`\`\`\nDetails: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"}" \
+
+      # - name: Install AWS CLI   --> we install aws cli in ubuntu runner itself
+      #   run: |
+      #     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+      #     unzip awscliv2.zip
+      #     sudo ./aws/install
+      #     aws --version 
+
+      - name: Upload Trivy Report to S3
+        run: |
+          TIMESTAMP=$(date +%Y-%m-%d-%H-%M-%S)
+          aws s3 cp trivy-report.json s3://reports-from-github-action-123/trivy-reports/trivy-report-${{ github.sha }}-${TIMESTAMP}.json
+
+  update-gitops:
+    name: Update GitOps Repository
+    runs-on: self-hosted  # Changed to self-hosted for consistency
+    needs: build-and-push
+    steps:
+      - name: Checkout GitOps Repository
+        uses: actions/checkout@v4
+        with:
+          repository: rafalzmyslony/gitops-repo-for-sample-apps
+          ssh-key: ${{ secrets.GITOPS_SSH_PRIVATE_KEY }}
+
+      - name: Extract Image Tag
+        run: echo "IMAGE_TAG=$(git rev-parse --short HEAD)-$(date +%s)" >> $GITHUB_ENV
+
+      - name: Update Kubernetes Manifest
+        run: |
+          cd flask-app-for-github-workflows/apps/flask-web-app
+          sed -i "s|image: .*|image: $REGISTRY/$REPOSITORY:${{ env.IMAGE_TAG }}|" deployment.yml
+
+      - name: Commit and Push Changes
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions123@github.com"
+          git add .
+          git commit -m "Deploy Flask App image: $REPOSITORY:${{ env.IMAGE_TAG }}"
+          git push origin main
+
+
+  terraform-validate:
+    name: Terraform Validation
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install unzip
+        run: sudo apt update && sudo apt install unzip -y
+
+      - name: Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Set Up Python  #  Add this to ensure Python is available
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Set Up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform Init
+        run: terraform -chdir=terraform init
+
+      - name: Terraform Validate
+        run: terraform -chdir=terraform validate
+
+      - name: Run Checkov (Terraform Security)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          quiet: true
+          framework: terraform
+          output_format: cli
+          soft_fail: true
+
+      - name: Install Checkov Locally
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install -r requirements.txt
+          pip install checkov
+          checkov --version
+
+      - name: Save Checkov Report
+        run: |
+          source venv/bin/activate  #  Activate venv here too
+          checkov -d terraform/ --output json > checkov_report.json
+
+      - name: Upload Checkov Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-security-report
+          path: checkov_report.json
+
+      - name: Mock Send Checkov Report to Slack
+        run: |
+          echo "Some CURL command to send report to Slack" 

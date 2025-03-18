@@ -1,0 +1,7 @@
+terraform/.terrafo*
+terraform/terrafo*
+gitops-write
+gitops-write.pub
+.secrets
+.env
+bin-act
