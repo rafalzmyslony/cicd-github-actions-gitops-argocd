@@ -46,6 +46,8 @@ The project is divided into two main parts:
    - The CI step pushes scan reports to S3 bucket. This app fetches them from S3 and sends them to Loki.
 ---
 
+![alt text](assets/image-grafana-dashboard.png)
+
 ## Prerequisites
 
 ### Tools
